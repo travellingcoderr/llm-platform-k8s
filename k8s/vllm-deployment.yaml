@@ -1,0 +1,51 @@
+# vLLM OpenAI-compatible server.
+# GPU: keep the nvidia.com/gpu limit and use a GPU node pool.
+# CPU/local: switch to a CPU build of vLLM and remove the GPU limit and nodeSelector.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: llm
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: vllm }
+  template:
+    metadata:
+      labels: { app: vllm }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # nodeSelector:
+      #   nvidia.com/gpu.present: "true"
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model=Qwen/Qwen2.5-0.5B-Instruct
+            - --max-model-len=4096
+          ports:
+            - containerPort: 8000
+          resources:
+            requests: { cpu: "2", memory: 8Gi }
+            limits:
+              memory: 16Gi
+              nvidia.com/gpu: 1
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 60
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: llm
+spec:
+  selector: { app: vllm }
+  ports:
+    - port: 8000
+      targetPort: 8000
