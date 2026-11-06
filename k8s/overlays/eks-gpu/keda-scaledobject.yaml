@@ -1,0 +1,19 @@
+# Scale on queue depth, not CPU: GPU servers look idle on CPU while requests pile up.
+# Each extra replica needs another GPU node: raise gpu_max_nodes in Terraform to match maxReplicaCount.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vllm
+  namespace: llm
+spec:
+  scaleTargetRef:
+    name: vllm
+  minReplicaCount: 1
+  maxReplicaCount: 2
+  cooldownPeriod: 600 # model load takes minutes; don't flap
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://kps-prometheus.monitoring.svc:9090
+        query: sum(vllm:num_requests_waiting{namespace="llm"})
+        threshold: "5"

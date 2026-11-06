@@ -1,0 +1,17 @@
+# helm upgrade --install kps prometheus-community/kube-prometheus-stack -n monitoring --create-namespace -f observability/kps-values.yaml
+fullnameOverride: kps
+grafana:
+  adminPassword: change-me # demo only; use a secret in anything real
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+prometheus:
+  prometheusSpec:
+    # pick up ServiceMonitors / rules from every namespace, not only ones labelled for this release
+    serviceMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    retention: 3d
+alertmanager:
+  enabled: false

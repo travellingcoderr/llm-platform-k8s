@@ -1,0 +1,22 @@
+# Local, no GPU: vLLM CPU build + Qwen2.5-0.5B. Needs about 6 GB RAM for the pod.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - target: { kind: Deployment, name: vllm }
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v0.29.0
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --dtype=bfloat16
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: VLLM_CPU_KVCACHE_SPACE, value: "2" }
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests: { cpu: "2", memory: 4Gi }
+          limits: { memory: 8Gi }

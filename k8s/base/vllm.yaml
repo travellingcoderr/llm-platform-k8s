@@ -1,0 +1,77 @@
+# vLLM OpenAI-compatible server. The overlays set the image, model and resources:
+#   overlays/kind-cpu  tiny model on CPU (laptop / kind, no GPU cost)
+#   overlays/eks-gpu   7B model on one NVIDIA A10G (g5.xlarge)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: llm
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # one GPU per node: don't try to surge a second pod
+  selector:
+    matchLabels: { app: vllm }
+  template:
+    metadata:
+      labels: { app: vllm }
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.32.0
+          args:
+            - --model=$(MODEL)
+            - --served-model-name=$(SERVED_NAME)
+            - --max-model-len=$(MAX_MODEL_LEN)
+            - --port=8000
+          env:
+            - { name: MODEL, value: "Qwen/Qwen2.5-0.5B-Instruct" }
+            - { name: SERVED_NAME, value: "qwen" }
+            - { name: MAX_MODEL_LEN, value: "4096" }
+            - name: HF_TOKEN # only needed for gated models
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          ports:
+            - { name: http, containerPort: 8000 }
+          startupProbe: # first start downloads weights: allow up to 20 minutes
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 120
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir: {}
+        - name: dshm # PyTorch / NCCL need more shared memory than the 64 MB default
+          emptyDir: { medium: Memory, sizeLimit: 4Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: llm
+  labels: { app: vllm }
+spec:
+  selector: { app: vllm }
+  ports:
+    - { name: http, port: 8000, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vllm
+  namespace: llm
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: { app: vllm }

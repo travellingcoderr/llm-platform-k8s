@@ -1,0 +1,14 @@
+# Scraped by kube-prometheus-stack (Prometheus Operator). vLLM exposes /metrics on the API port.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm
+  namespace: llm
+  labels: { release: kps }
+spec:
+  selector:
+    matchLabels: { app: vllm }
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

@@ -1,0 +1,33 @@
+# One NVIDIA A10G (24 GB): Qwen2.5-7B-Instruct in bf16 (about 15 GB of weights) with an 8k context.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - keda-scaledobject.yaml
+patches:
+  - target: { kind: Deployment, name: vllm }
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0
+        value: { name: MODEL, value: "Qwen/Qwen2.5-7B-Instruct" }
+      - op: replace
+        path: /spec/template/spec/containers/0/env/2
+        value: { name: MAX_MODEL_LEN, value: "8192" }
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --gpu-memory-utilization=0.90
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --enable-prefix-caching
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests: { cpu: "3", memory: 12Gi, nvidia.com/gpu: 1 }
+          limits: { memory: 15Gi, nvidia.com/gpu: 1 }
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: { workload: llm }
+      - op: add
+        path: /spec/template/spec/tolerations
+        value:
+          - { key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule }
