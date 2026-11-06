@@ -1,33 +1,69 @@
-# Project 01: Self-Hosted LLM Platform on Kubernetes
+# Self-Hosted LLM Platform on Kubernetes
 
-Serve an open-source LLM (Qwen / Llama) with **vLLM** on Kubernetes, expose it through the **Kubernetes Gateway API**, autoscale it, and track cost per token, all provisioned with **Terraform**.
+Serve an open-weight LLM with **vLLM** on Kubernetes, route traffic through the **Gateway API** (Envoy Gateway), autoscale on queue depth with **KEDA**, and track **tokens/sec, latency and $ per 1M tokens** in Prometheus and Grafana. The AWS side is provisioned with **Terraform** (EKS + a GPU node group that scales to zero).
 
-**Why it matters:** many AI Platform / LLMOps job posts ask for open-source model serving, GPU workloads, and Kubernetes. This builds on your EKS + Terraform experience and the Gateway API you've been learning.
-
-## Architecture
 ```
-Client ──► Gateway (Gateway API) ──► HTTPRoute ──► Service ──► vLLM Deployment (GPU node)
-                                                              │
-                                    Prometheus ◄── /metrics ──┘ ──► Grafana (tokens/sec, latency, $/1M tokens)
+                    ┌──────────────── EKS / kind ─────────────────────────────────────┐
+client ──HTTP──►  Gateway (Envoy) ──► HTTPRoute ──► Service ──► vLLM pods (GPU node, scale 0..N)
+                    │                                              │ /metrics
+                    │   KEDA ScaledObject ◄── Prometheus ◄─────────┘ (ServiceMonitor)
+                    │   (vllm:num_requests_waiting)  │
+                    │                                └──► recording rules ──► Grafana dashboard
+                    └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Milestones (about 2–3 weeks, 6–8 hrs/week)
-1. **Local first (no GPU cost):** run `kind` locally, deploy vLLM in CPU mode with a tiny model (`Qwen/Qwen2.5-0.5B-Instruct`), call it with `curl`.
-2. **Gateway API:** install a Gateway API implementation (e.g., Envoy Gateway or NGINX Gateway Fabric), apply `k8s/gateway.yaml` + `k8s/httproute.yaml`.
-3. **Cloud GPU:** Terraform an EKS (or AKS) cluster with one GPU node pool (`terraform/`), deploy `k8s/vllm-deployment.yaml`. **Destroy it when done**, because GPU nodes are expensive.
-4. **Observability:** scrape vLLM `/metrics` with Prometheus, build a Grafana dashboard: tokens/sec, p95 latency, GPU util, cost per 1M tokens.
-5. **Load test + autoscale:** load test with `scripts/loadtest.py`, add an HPA or KEDA on queue depth, document results.
-6. **Write-up:** README with diagram, benchmark table, cost comparison vs a hosted API (Claude / Azure OpenAI).
+## What's in the repo
 
-## Quick start (local)
+| Path | What it does |
+|---|---|
+| `terraform/` | VPC + EKS (`terraform-aws-modules` VPC v6, EKS v21), a small system node group, a tainted `g5.xlarge` GPU node group with `min_size = 0`, and an AWS Budgets alert |
+| `k8s/base/` | vLLM Deployment (OpenAI-compatible server, readiness/liveness/startup probes, `/dev/shm`, PDB), Gateway API `GatewayClass`/`Gateway`/`HTTPRoute` (300 s timeout for long generations), `ServiceMonitor` |
+| `k8s/overlays/kind-cpu` | Local, no GPU: vLLM CPU image + `Qwen2.5-0.5B-Instruct` |
+| `k8s/overlays/eks-gpu` | `Qwen2.5-7B-Instruct` on 1x A10G, GPU toleration/node selector, KEDA `ScaledObject` scaling on `vllm:num_requests_waiting` |
+| `observability/` | kube-prometheus-stack values, `PrometheusRule` (throughput, p95 TTFT/E2E, **$ per 1M output tokens**, backlog + KV-cache alerts), Grafana dashboard (auto-loaded by the sidecar) |
+| `scripts/kind-up.sh`, `scripts/eks-up.sh` | One-command bootstrap of the add-ons and the right overlay |
+| `scripts/loadtest.py` | Streaming load tester: TTFT, E2E p50/p95, tokens/sec and $ / 1M tokens across a concurrency sweep; writes JSON + a markdown table |
+| `.github/workflows/ci.yml` | `terraform fmt/validate`, `kustomize build` + `kubeconform -strict` (incl. Gateway API, Prometheus Operator and KEDA CRDs), `pytest` |
+
+## Run it locally (free, CPU only)
+
+Needs Docker, kind, kubectl and helm, and about 8 GB of free RAM.
+
 ```bash
-kind create cluster --name llm
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/vllm-deployment.yaml   # edit image/resources for CPU vs GPU first
-kubectl -n llm port-forward svc/vllm 8000:8000
-curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model":"Qwen/Qwen2.5-0.5B-Instruct","messages":[{"role":"user","content":"Hello"}]}'
+./scripts/kind-up.sh
+kubectl -n envoy-gateway-system port-forward svc/<printed-service> 8080:80 &
+curl localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"qwen","messages":[{"role":"user","content":"Hello"}]}'
+python scripts/loadtest.py --url http://localhost:8080 --model qwen --concurrency 1,4 -n 20 --label "kind CPU"
 ```
 
-## Resume bullet once finished (fill in your numbers)
-> Built a self-hosted LLM serving platform (vLLM on Kubernetes, Gateway API, Terraform) with Prometheus/Grafana token-cost observability, sustaining __ tokens/sec at p95 __ ms and cutting cost per 1M tokens by __% vs hosted APIs.
+Grafana: `kubectl -n monitoring port-forward svc/kps-grafana 3000:80` and open the "LLM Platform" dashboard.
+
+## Run it on AWS with a GPU
+
+A `g5.xlarge` is about $1.006/hour on demand in us-east-1 ([DoiT pricing](https://www.doit.com/compute/compute/aws/us-east-1/g5.xlarge)), plus the EKS control plane and a NAT gateway. The GPU group scales to zero, but **run `terraform destroy` when you're done.**
+
+```bash
+cd terraform && cp terraform.tfvars.example terraform.tfvars   # set budget_alert_email
+terraform init && terraform apply
+cd .. && ./scripts/eks-up.sh
+python scripts/loadtest.py --url http://<gateway-lb-hostname> --model qwen \
+  --concurrency 1,4,8,16,32 -n 64 --usd-per-hour 1.006 \
+  --label "EKS g5.xlarge, vLLM v0.32, Qwen2.5-7B" --out docs/runs/g5-7b.json
+kubectl delete -k k8s/overlays/eks-gpu && terraform -chdir=terraform destroy
+```
+
+## How cost per token is computed
+
+For a dedicated node, cost per 1M output tokens = (node $/hour ÷ 3600) ÷ sustained output tokens/sec × 1,000,000. The same formula is used by `loadtest.py` (offline) and by the `llm:usd_per_1m_output_tokens` recording rule (live, from `vllm:generation_tokens_total`). Set the node price in `observability/cost-rules.yaml`. This ignores idle time, so the real number is only reached when the node stays busy; that's the main argument for scale-to-zero and for queue-based autoscaling.
+
+## Results
+
+See [docs/benchmark-results.md](docs/benchmark-results.md). The GPU numbers are filled in from a real EKS run; no numbers in this repo are estimates.
+
+## Design notes
+
+- **Gateway API over Ingress:** typed routes, per-route timeouts, and a clean path to AI-gateway features (rate limits per tenant, model routing) without annotations.
+- **KEDA on `num_requests_waiting`, not CPU:** GPU inference saturates on batch/KV-cache capacity, so the queue is the honest signal. Scale-up is aggressive, scale-down has a 5 min cooldown because a cold start (node + model pull) takes minutes.
+- **Taint + toleration on GPU nodes** so system pods never land on the expensive node and it can scale to zero.
+- **Pinned versions** (vLLM image, Envoy Gateway chart, Terraform modules) so the stack reproduces.

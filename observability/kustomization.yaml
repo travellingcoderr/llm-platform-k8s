@@ -1,0 +1,12 @@
+# kubectl apply -k observability/   (after kube-prometheus-stack is installed)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cost-rules.yaml
+configMapGenerator:
+  - name: llm-grafana-dashboard
+    namespace: monitoring
+    files: [grafana-dashboard.json]
+    options:
+      labels: { grafana_dashboard: "1" }
+      disableNameSuffixHash: true
